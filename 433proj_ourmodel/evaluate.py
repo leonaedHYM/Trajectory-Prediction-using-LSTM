@@ -1,0 +1,100 @@
+from __future__ import print_function
+import torch
+from model import highwayNet
+from classification import Maneuver_class
+from utils import ngsimDataset,maskedNLL,maskedMSETest,maskedNLLTest
+from torch.utils.data import DataLoader
+import time
+from tqdm import tqdm
+import os
+
+os.environ["CUDA_VISIBLE_DEVICES"]="0"
+
+## Network Arguments
+args = {}
+args['use_cuda'] = True
+args['encoder_size'] = 64
+args['decoder_size'] = 128
+args['in_length'] = 16
+args['out_length'] = 25
+args['grid_size'] = (13,3)
+args['soc_conv_depth'] = 64
+args['conv_3x1_depth'] = 16
+args['dyn_embedding_size'] = 32
+args['input_embedding_size'] = 32
+args['num_lat_classes'] = 3
+args['num_lon_classes'] = 2
+args['use_maneuvers'] = True
+args['train_flag'] = False
+
+
+# Evaluation metric:
+metric = 'rmse'  #or rmse
+
+
+# Initialize network
+net = highwayNet(args,14)
+net.load_state_dict(torch.load('output/model_44.pth')['state_dict'])
+
+if args['use_cuda']:
+    net = net.cuda()
+
+#tsSet = ngsimDataset('data/TestSet.mat')
+#tsDataloader = DataLoader(tsSet,batch_size=32,shuffle=True,num_workers=0,collate_fn=tsSet.collate_fn)
+tr_set = torch.load('valset_batchSize=64.pt')
+
+lossVals = torch.zeros(25).cuda()
+counts = torch.zeros(25).cuda()
+
+num_batch = tr_set[0].shape[0]
+    #for i, data in enumerate(trDataloader):
+for i in tqdm(range(num_batch)):
+    hist = tr_set[0][i]
+    lat_enc = tr_set[1][i]
+    lon_enc = tr_set[2][i]
+    fut = tr_set[3][i]
+    op_mask = tr_set[4][i]
+    
+    if args['use_cuda']:
+        hist = hist.cuda()
+        lat_enc = lat_enc.cuda()
+        lon_enc = lon_enc.cuda()
+        fut = fut.cuda()
+        op_mask = op_mask.cuda()
+
+    if metric == 'nll':
+        # Forward pass
+        if args['use_maneuvers']:
+            fut_pred, lat_pred, lon_pred = net(hist, lat_enc, lon_enc)
+            
+            l,c = maskedNLLTest(fut_pred, lat_pred, lon_pred, fut, op_mask)
+            #l, c = maskedNLLTest(fut_pred, lat_enc, lon_enc, fut, op_mask)
+        else:
+            fut_pred = net(hist, lat_enc, lon_enc)
+            l, c = maskedNLLTest(fut_pred, 0, 0, fut, op_mask,use_maneuvers=False)
+    else:
+        # Forward pass
+        if args['use_maneuvers']:
+            fut_pred, lat_pred, lon_pred = net(hist, lat_enc, lon_enc)
+            
+            fut_pred_max = torch.zeros_like(fut_pred[0])
+            for k in range(lat_pred.shape[0]):
+                lat_man = torch.argmax(lat_pred[k, :]).detach()
+                lon_man = torch.argmax(lon_pred[k, :]).detach()
+                indx = lon_man*3 + lat_man
+                fut_pred_max[:,k,:] = fut_pred[indx][:,k,:]
+            l, c = maskedMSETest(fut_pred_max, fut, op_mask)
+        else:
+            fut_pred = net(hist, nbrs, mask, lat_enc, lon_enc)
+            l, c = maskedMSETest(fut_pred, fut, op_mask)
+
+
+    lossVals +=l.detach()
+    counts += c.detach()
+
+if metric == 'nll':
+    print(lossVals / counts)
+else:
+    print(torch.pow(lossVals / counts,0.5)*0.3048)   # Calculate RMSE and convert from feet to meters
+
+
